@@ -1,7 +1,9 @@
-import xml.etree.ElementTree as ET
-import tkinter as tk
-from tkinter import ttk, messagebox
+import streamlit as st
+import folium
+from streamlit_folium import st_folium
+from streamlit_geolocation import streamlit_geolocation
 import math
+import xml.etree.ElementTree as ET
 import re
 
 # =========================
@@ -100,7 +102,7 @@ def load_polygons(xml_file):
 # LOCALIZAÇÃO (SIMULADA)
 # =========================
 def get_user_location():
-    return 38.749386, -9.157919  # Lisboa — substitui por GPS real
+    return 38.749386, -9.157919  # Lisboa
 
 # =========================
 # LÓGICA PRINCIPAL
@@ -109,61 +111,126 @@ def min_dist_to_polygon(user_lat, user_lon, coords):
     """Distância ao vértice mais próximo do polígono."""
     return min(haversine(user_lat, user_lon, p[0], p[1]) for p in coords)
 
-def find_best_zone(polygons, user_lat, user_lon, radius):
-    current_zone = None
-    nearby_zones = []
+def find_best_zone_with_polygon(polygons, user_lat, user_lon, radius):
+  
+    current_zone_price = None
+    cheapest_price = float('inf')
+    cheapest_polygon = None
 
     for poly in polygons:
         coords = poly["coords"]
-        price  = prices[poly["color"]]
+        price = prices[poly["color"]]
 
-        # Dentro da zona → conta sempre, independente do raio
         if point_in_polygon(user_lat, user_lon, coords):
-            current_zone = price
-            nearby_zones.append(price)
-            continue
+            current_zone_price = price
 
-        # Fora da zona → mede distância ao ponto mais próximo
-        dist = min_dist_to_polygon(user_lat, user_lon, coords)
+        dist = min(haversine(user_lat, user_lon, p[0], p[1]) for p in coords)
+        
         if dist <= radius:
-            nearby_zones.append(price)
+            if price < cheapest_price:
+                cheapest_price = price
+                cheapest_polygon = poly
 
-    if not nearby_zones:
-        return "Não há zonas nesse raio."
+    return current_zone_price, cheapest_price, cheapest_polygon
 
-    min_price = min(nearby_zones)
+# ==========================================
+# 3. INTERFACE APLICAÇÃO
+# ==========================================
+def main():
+    @st.cache_data
+    def get_data():
+        return load_polygons("listzones.xml")
+    
+    polygons = get_data()
 
-    if current_zone is not None and current_zone <= min_price:
-        return "Estás na zona mais barata 🎉"
-    else:
-        return f"Há zonas mais baratas por {min_price}€/hora"
+    if 'page' not in st.session_state:
+        st.session_state.page = "home"
 
-# =========================
-# INTERFACE
-# =========================
-def run_app():
-    polygons = load_polygons(r"C:\Users\utilizador\OneDrive - Nova SBE\Introduction to Programming\listzones.xml")
+    # ==========================================
+    # PAGE 1: PÁGINA INICIAL
+    # ==========================================
+    if st.session_state.page == "home":
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            st.title("🚗 BestParking")
+            st.write("Find the cheapest parking zone near you in the blink of an eye.")
+            
+            st.write("") 
+            
+            if st.button("Start 🚀", use_container_width=True):
+                st.session_state.page = "map"
+                st.rerun() 
 
-    def check():
-        radius = int(combo.get())
-        lat, lon = get_user_location()
-        result = find_best_zone(polygons, lat, lon, radius)
-        messagebox.showinfo("Resultado", result)
+    # ==========================================
+    # PAGE 2: MAPA E RESULTADOS
+    # ==========================================
+    elif st.session_state.page == "map":
+        st.title("📍 BestParking")
 
-    root = tk.Tk()
-    root.title("Zonas de Estacionamento")
+        st.write("Tap below to get your current location:")
+        loc = streamlit_geolocation()
 
-    tk.Label(root, text="Escolhe o raio (metros):").pack(pady=10)
+        user_lat, user_lon = 38.749386, -9.157919
 
-    combo = ttk.Combobox(root, values=[100, 300, 500])
-    combo.current(0)
-    combo.pack()
+        if loc and loc['latitude'] is not None and loc['longitude'] is not None:
+            user_lat = loc['latitude']
+            user_lon = loc['longitude']
 
-    tk.Button(root, text="Verificar", command=check).pack(pady=20)
+        if 'clicked_lat' in st.session_state:
+            user_lat = st.session_state.clicked_lat
+            user_lon = st.session_state.clicked_lon
 
-    root.mainloop()
+        radius = st.selectbox("Choose the search radius (meters):", [100, 300, 500, 1000])
 
-# =========================
-# RUN
-# =========================
-run_app()
+        current_price, cheap_price, cheap_poly = find_best_zone_with_polygon(polygons, user_lat, user_lon, radius)
+
+        # MENSAGENS DE RESULTADO
+        if current_price is None:
+            st.success("🎉 You are in a free zone (€0/hour)! This is the best possible spot.")
+            cheap_poly = None 
+        else:
+            st.error(f"📍 You are in a **€{current_price:.2f}/hour** zone.")
+            
+            if cheap_price < current_price:
+                st.success(f"💸 The cheapest zone within {radius}m costs only **€{cheap_price:.2f}/hour**! Check the map.")
+            else:
+                st.info(f"✅ You are already in the cheapest paid zone within a {radius}m radius.")
+
+        # DESENHO DO MAPA
+        st.write("*(You can tap anywhere on the map to change your location)*")
+        m = folium.Map(location=[user_lat, user_lon], zoom_start=15)
+
+        folium.Marker(
+            [user_lat, user_lon], 
+            popup="You are here", 
+            icon=folium.Icon(color="black", icon="car", prefix='fa')
+        ).add_to(m)
+
+        if cheap_poly:
+            folium.Polygon(
+                locations=cheap_poly["coords"],
+                color=cheap_poly["color"],
+                fill=True,
+                fill_opacity=0.4
+            ).add_to(m)
+
+        map_data = st_folium(m, width=350, height=450)
+
+        if map_data and map_data.get("last_clicked"):
+            new_lat = map_data["last_clicked"]["lat"]
+            new_lon = map_data["last_clicked"]["lng"]
+            
+            if new_lat != user_lat or new_lon != user_lon:
+                st.session_state.clicked_lat = new_lat
+                st.session_state.clicked_lon = new_lon
+                st.rerun()
+
+        if st.button("⬅️ Back to Home"):
+            st.session_state.page = "home"
+            if 'clicked_lat' in st.session_state:
+                del st.session_state['clicked_lat']
+                del st.session_state['clicked_lon']
+            st.rerun()
+
+if __name__ == "__main__":
+    main()
