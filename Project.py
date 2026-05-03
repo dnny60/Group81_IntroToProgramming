@@ -1,4 +1,3 @@
-import re
 from datetime import date, datetime, time
 
 import streamlit as st
@@ -19,6 +18,7 @@ from parking_logic import (
 DEFAULT_LAT = 38.749386
 DEFAULT_LON = -9.157919
 GEOMETRY_CACHE_VERSION = 3
+MAP_RENDER_VERSION = 3
 
 
 def initialize_state() -> None:
@@ -87,32 +87,8 @@ def reset_filters() -> None:
         st.session_state[f"filter_{color}"] = True
 
 
-def parse_polygon_id_from_tooltip(tooltip: str | None, results=None) -> int | None:
-    if not tooltip:
-        return None
-    match = re.search(r"Polygon\s+(\d+)", tooltip)
-    if match:
-        return int(match.group(1))
-
-    zone_match = re.search(r"Zone\s+([^|<]+)", tooltip)
-    if zone_match and results is not None:
-        zone_id = zone_match.group(1).strip()
-        result = next((item for item in results if item.zone.zone_id == zone_id), None)
-        if result is not None:
-            return result.zone.polygon_id
-
-    return None
-
-
 def format_money(value: float | None) -> str:
     return "N/A" if value is None else f"EUR {value:.2f}"
-
-
-def format_signed_money(value: float | None) -> str:
-    if value is None:
-        return "N/A"
-    sign = "+" if value > 0 else ""
-    return f"{sign}EUR {value:.2f}"
 
 
 def table_rows(
@@ -124,8 +100,6 @@ def table_rows(
     rows = []
     for result in results:
         labels = []
-        if selected_polygon_id == result.zone.polygon_id:
-            labels.append("Selected")
         if result.is_cheapest:
             labels.append("Cheapest")
         if result.is_optimal:
@@ -138,6 +112,7 @@ def table_rows(
         rows.append(
             {
                 "Polygon ID": result.zone.polygon_id,
+                "Selected": "✓" if selected_polygon_id == result.zone.polygon_id else "",
                 "Status": ", ".join(labels),
                 "Zone ID": result.zone.zone_id,
                 "Suggested street": street_by_polygon_id.get(result.zone.polygon_id, "N/A"),
@@ -147,9 +122,7 @@ def table_rows(
                 "Walking Time": f"{result.walking_time_min:.0f} min",
                 "Charged Hours": f"{result.billable_hours:.2f} h",
                 "Duration Cost": format_money(result.total_cost),
-                "Savings": format_signed_money(result.savings),
                 "Score": "N/A" if result.score is None else f"{result.score:.3f}",
-                "Warning": result.warning,
             }
         )
     return rows
@@ -365,13 +338,13 @@ def get_zones(cache_version: int):
 
 
 def main() -> None:
-    st.set_page_config(page_title="🚗BestParking", layout="wide")
+    st.set_page_config(page_title="🚗Best Street Parking", layout="wide")
     initialize_state()
     zones = get_zones(GEOMETRY_CACHE_VERSION)
     controls = render_sidebar()
 
     st.title("🚗BestParking")
-    st.caption("Smart Lisbon parking-zone advisor")
+    st.caption("Smart Lisbon street parking-zone advisor")
 
     location_ready = st.session_state.destination_source is not None
     destination_lat = st.session_state.destination_lat
@@ -499,10 +472,10 @@ def main() -> None:
         )
         map_data = st_folium(
             parking_map,
-            key=f"parking_map_{st.session_state.map_key_nonce}",
+            key=f"parking_map_{MAP_RENDER_VERSION}_{st.session_state.map_key_nonce}",
             height=620,
             use_container_width=True,
-            returned_objects=["last_clicked", "last_object_clicked_tooltip"],
+            returned_objects=["last_clicked"],
         )
 
     with detail_col:
@@ -515,14 +488,6 @@ def main() -> None:
         if coordinates_changed(new_lat, new_lon, destination_lat, destination_lon):
             set_destination(new_lat, new_lon, "Map click destination", "click")
             st.rerun()
-
-    map_selected_id = parse_polygon_id_from_tooltip(
-        map_data.get("last_object_clicked_tooltip") if map_data else None,
-        results,
-    )
-    if map_selected_id and map_selected_id != st.session_state.selected_polygon_id:
-        st.session_state.selected_polygon_id = map_selected_id
-        st.rerun()
 
     st.subheader("Comparison table")
     rows = table_rows(
@@ -547,6 +512,7 @@ def main() -> None:
         hide_index=True,
         use_container_width=True,
         column_order=[
+            "Selected",
             "Status",
             "Zone ID",
             "Suggested street",
@@ -556,9 +522,7 @@ def main() -> None:
             "Walking Time",
             "Charged Hours",
             "Duration Cost",
-            "Savings",
             "Score",
-            "Warning",
         ],
         on_select="rerun",
         selection_mode="single-row",
