@@ -1,287 +1,580 @@
+import re
+from datetime import date, datetime, time
+
 import streamlit as st
-import folium
 from streamlit_folium import st_folium
 from streamlit_geolocation import streamlit_geolocation
-import math
-import xml.etree.ElementTree as ET
-import re
 
-# =========================
-# NAMESPACES DO XML
-# =========================
-NS_MC      = "http://datex2.eu/schema/3/messageContainer"
-NS_PARKING = "http://datex2.eu/schema/3/parking"
-NS_COMMON  = "http://datex2.eu/schema/3/common"
-NS_LOC     = "http://datex2.eu/schema/3/locationReferencing"
-
-# =========================
-# PREÇOS POR COR
-# =========================
-prices = {
-    "green":  0.80,
-    "yellow": 1.20,
-    "red":    1.60,
-    "brown":  2.00
-}
-
-COLOR_HEX = {
-    "green":  "#2ecc71",
-    "yellow": "#f1c40f",
-    "red":    "#e74c3c",
-    "brown":  "#a0522d"
-}
-
-# =========================
-# DISTÂNCIA ENTRE PONTOS
-# =========================
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371000
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi    = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
-    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
-# =========================
-# PONTO DENTRO DO POLÍGONO
-# =========================
-def point_in_polygon(lat, lon, polygon):
-    inside = False
-    j = len(polygon) - 1
-    for i in range(len(polygon)):
-        xi, yi = polygon[i]
-        xj, yj = polygon[j]
-        if ((yi > lon) != (yj > lon)) and (lat < (xj - xi) * (lon - yi) / (yj - yi + 1e-9) + xi):
-            inside = not inside
-        j = i
-    return inside
-
-# =========================
-# LER XML
-# =========================
-def load_polygons(xml_file):
-    tree = ET.parse(xml_file)
-    root = tree.getroot()
- 
-    parking_tables = root.findall(f".//{{{NS_PARKING}}}parkingTable")
-    polygons = []
- 
-    for table in parking_tables:
-        color = None
-        for elem in table.findall(f".//{{{NS_COMMON}}}value"):
-            if elem.text and color is None:
-                text = elem.text.lower()
-                if "verde" in text:       color = "green"
-                elif "amarela" in text:   color = "yellow"
-                elif "vermelha" in text:  color = "red"
-                elif "castanha" in text:  color = "brown"
- 
-        if not color:
-            continue
- 
-        for posList in table.findall(f".//{{{NS_LOC}}}posList"):
-            if not posList.text:
-                continue
- 
-            for bloco in posList.text.split(';'):
-                pairs = re.findall(r'\[(-?\d+\.\d+),\s*(-?\d+\.\d+)\]', bloco)
-                coords = []
-                for lon_str, lat_str in pairs:
-                    try:
-                        coords.append((float(lat_str), float(lon_str)))
-                    except ValueError:
-                        continue
- 
-                if len(coords) >= 3:
-                    centroid_lat = sum(c[0] for c in coords) / len(coords)
-                    centroid_lon = sum(c[1] for c in coords) / len(coords)
-                    polygons.append({
-                        "coords": coords,
-                        "color": color,
-                        "centroid_lat": centroid_lat,
-                        "centroid_lon": centroid_lon,
-                    })
- 
-    print(f"[DEBUG] Zonas carregadas: {len(polygons)}")
-    return polygons
-
-# =========================
-# LÓGICA PRINCIPAL
-# =========================
-
-# Retorna o preço da zona em que o utilizador se encontra, ou nenhuma se for não paga
-def get_current_zone(polygons, user_lat, user_lon):
-    for poly in polygons:
-        if point_in_polygon(user_lat, user_lon, poly["coords"]):
-            return prices[poly["color"]]
-    return None  # zona não paga
-
-# Retorna (cheapest_price, list_of_cheap_polygons) para todas as zonas na qual o vértice está dentro do raio selecionado pelo utilizador
-def find_cheapest_nearby(polygons, user_lat, user_lon, radius, cheaper_than=None):
-    cheapest_price = float('inf')
-    cheapest_polygons = []
- 
-    for poly in polygons:
-
-        dist = haversine(user_lat, user_lon, poly["centroid_lat"], poly["centroid_lon"])
-        if dist > radius:
-            continue
- 
-        price = prices[poly["color"]]
-        if cheaper_than is not None and price >= cheaper_than:
-            continue
- 
-        if price < cheapest_price:
-            cheapest_price = price
-            cheapest_polygons = [poly]
-        elif price == cheapest_price:
-            cheapest_polygons.append(poly)
- 
-    if cheapest_price == float('inf'):
-        return None, []
-    return cheapest_price, cheapest_polygons
+from geo_services import fetch_walking_route, geocode_address, reverse_geocode_street
+from map_view import build_map
+from parking_data import COLOR_FILTERS, COLOR_HEX, COLOR_LABELS, PRICES, load_parking_zones
+from parking_logic import (
+    apply_route_to_result,
+    build_zone_results,
+    coordinates_changed,
+    nearest_point_on_polygon,
+)
 
 
-# ==========================================
-# 3. INTERFACE APLICAÇÃO
-# ==========================================
-def main():
-    @st.cache_data
-    def get_data():
-        return load_polygons("listzones.xml")
-    
-    polygons = get_data()
+DEFAULT_LAT = 38.749386
+DEFAULT_LON = -9.157919
+GEOMETRY_CACHE_VERSION = 3
 
-    if 'page' not in st.session_state:
-        st.session_state.page = "home"
 
-    # ==========================================
-    # PAGE 1: PÁGINA INICIAL
-    # ==========================================
-    if st.session_state.page == "home":
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            st.title("🚗 BestParking")
-            st.write("Find the cheapest parking zone near you in the blink of an eye.")
-            st.write("") 
-            if st.button("Start 🚀", use_container_width=True):
-                st.session_state.page = "map"
-                st.rerun() 
+def initialize_state() -> None:
+    defaults = {
+        "destination_lat": DEFAULT_LAT,
+        "destination_lon": DEFAULT_LON,
+        "destination_label": "Default position in Lisbon",
+        "destination_source": None,
+        "selected_polygon_id": None,
+        "selected_recommendation_polygon_id": None,
+        "address_query": "",
+        "duration_hours": 2.0,
+        "radius_m": 500,
+        "include_unknown": False,
+        "cost_importance": 50,
+        "parking_date": date.today(),
+        "parking_start_time": time(9, 0),
+        "map_key_nonce": 0,
+        "recommendation_signature": None,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
-    # ==========================================
-    # PAGE 2: MAPA E RESULTADOS
-    # ==========================================
-    elif st.session_state.page == "map":
-        st.title("📍 BestParking")
+    for color in COLOR_FILTERS:
+        key = f"filter_{color}"
+        if key not in st.session_state:
+            st.session_state[key] = True
 
-        st.write("Tap below to get your current location:")
+    st.session_state.radius_m = min(1000, max(100, int(st.session_state.radius_m)))
+    st.session_state.duration_hours = min(24.0, max(0.25, float(st.session_state.duration_hours)))
+    st.session_state.cost_importance = min(100, max(0, int(st.session_state.cost_importance)))
+
+
+def set_destination(lat: float, lon: float, label: str, source: str) -> None:
+    st.session_state.destination_lat = lat
+    st.session_state.destination_lon = lon
+    st.session_state.destination_label = label
+    st.session_state.destination_source = source
+    st.session_state.selected_polygon_id = None
+    st.session_state.selected_recommendation_polygon_id = None
+    st.session_state.map_key_nonce += 1
+
+
+def reset_destination() -> None:
+    st.session_state.destination_lat = DEFAULT_LAT
+    st.session_state.destination_lon = DEFAULT_LON
+    st.session_state.destination_label = "Default position in Lisbon"
+    st.session_state.destination_source = None
+    st.session_state.selected_polygon_id = None
+    st.session_state.selected_recommendation_polygon_id = None
+    st.session_state.map_key_nonce += 1
+
+
+def reset_filters() -> None:
+    st.session_state.duration_hours = 2.0
+    st.session_state.radius_m = 500
+    st.session_state.include_unknown = False
+    st.session_state.cost_importance = 50
+    st.session_state.parking_date = date.today()
+    st.session_state.parking_start_time = time(9, 0)
+    st.session_state.selected_polygon_id = None
+    st.session_state.selected_recommendation_polygon_id = None
+
+    for color in COLOR_FILTERS:
+        st.session_state[f"filter_{color}"] = True
+
+
+def parse_polygon_id_from_tooltip(tooltip: str | None, results=None) -> int | None:
+    if not tooltip:
+        return None
+    match = re.search(r"Polygon\s+(\d+)", tooltip)
+    if match:
+        return int(match.group(1))
+
+    zone_match = re.search(r"Zone\s+([^|<]+)", tooltip)
+    if zone_match and results is not None:
+        zone_id = zone_match.group(1).strip()
+        result = next((item for item in results if item.zone.zone_id == zone_id), None)
+        if result is not None:
+            return result.zone.polygon_id
+
+    return None
+
+
+def format_money(value: float | None) -> str:
+    return "N/A" if value is None else f"EUR {value:.2f}"
+
+
+def format_signed_money(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    sign = "+" if value > 0 else ""
+    return f"{sign}EUR {value:.2f}"
+
+
+def table_rows(
+    results,
+    selected_polygon_id: int | None,
+    street_by_polygon_id: dict[int, str] | None = None,
+) -> list[dict[str, object]]:
+    street_by_polygon_id = street_by_polygon_id or {}
+    rows = []
+    for result in results:
+        labels = []
+        if selected_polygon_id == result.zone.polygon_id:
+            labels.append("Selected")
+        if result.is_cheapest:
+            labels.append("Cheapest")
+        if result.is_optimal:
+            labels.append("Optimal")
+        if result.is_closest:
+            labels.append("Closest")
+        if result.is_current:
+            labels.append("Current")
+
+        rows.append(
+            {
+                "Polygon ID": result.zone.polygon_id,
+                "Status": ", ".join(labels),
+                "Zone ID": result.zone.zone_id,
+                "Suggested street": street_by_polygon_id.get(result.zone.polygon_id, "N/A"),
+                "Color": COLOR_LABELS.get(result.zone.color, "Unknown"),
+                "Price/hour": format_money(result.hourly_price),
+                "Distance": f"{result.distance_m:.0f} m",
+                "Walking Time": f"{result.walking_time_min:.0f} min",
+                "Charged Hours": f"{result.billable_hours:.2f} h",
+                "Duration Cost": format_money(result.total_cost),
+                "Savings": format_signed_money(result.savings),
+                "Score": "N/A" if result.score is None else f"{result.score:.3f}",
+                "Warning": result.warning,
+            }
+        )
+    return rows
+
+
+def recommendation_results(results) -> list:
+    picks = []
+
+    for predicate in (
+        lambda result: result.is_cheapest,
+        lambda result: result.is_optimal,
+        lambda result: result.is_closest,
+    ):
+        result = next((item for item in results if predicate(item)), None)
+        if result is not None and result not in picks:
+            picks.append(result)
+
+    return picks
+
+
+def primary_recommendation(results):
+    return next((result for result in results if result.is_optimal), None) or (
+        results[0] if results else None
+    )
+
+
+def ensure_recommendation_selection(results) -> None:
+    recommendation = primary_recommendation(results)
+    if recommendation is None:
+        st.session_state.selected_recommendation_polygon_id = None
+        return
+
+    recommendation_ids = {result.zone.polygon_id for result in results}
+    if st.session_state.selected_recommendation_polygon_id not in recommendation_ids:
+        st.session_state.selected_recommendation_polygon_id = recommendation.zone.polygon_id
+
+
+def recommendation_signature(
+    controls: dict[str, object],
+    destination_lat: float,
+    destination_lon: float,
+) -> tuple[object, ...]:
+    return (
+        round(destination_lat, 6),
+        round(destination_lon, 6),
+        controls["parking_start"].isoformat(),
+        controls["duration_hours"],
+        controls["radius_m"],
+        tuple(sorted(controls["selected_colors"])),
+        controls["include_unknown"],
+        controls["cost_importance"],
+    )
+
+
+def reset_recommendation_on_input_change(
+    controls: dict[str, object],
+    destination_lat: float,
+    destination_lon: float,
+    results,
+) -> None:
+    signature = recommendation_signature(controls, destination_lat, destination_lon)
+    if st.session_state.recommendation_signature == signature:
+        ensure_recommendation_selection(results)
+        return
+
+    st.session_state.recommendation_signature = signature
+    recommendation = primary_recommendation(results)
+    st.session_state.selected_recommendation_polygon_id = (
+        recommendation.zone.polygon_id if recommendation else None
+    )
+    st.session_state.selected_polygon_id = None
+
+
+def selected_result(results, selected_polygon_id: int | None):
+    if selected_polygon_id is None:
+        return None
+    return next((result for result in results if result.zone.polygon_id == selected_polygon_id), None)
+
+
+def render_detail_panel(result, show_close: bool = True) -> None:
+    st.subheader("Zone details")
+    if result is None:
+        st.info("Select a row in the results table or click a zone on the map.")
+        return
+
+    zone = result.zone
+    if show_close and st.button("Close details", use_container_width=True):
+        st.session_state.selected_polygon_id = None
+        st.rerun()
+
+    st.write(f"Price/hour: {format_money(result.hourly_price)}")
+    st.write(f"Duration cost: {format_money(result.total_cost)}")
+
+    with st.expander("Parking rules", expanded=True):
+        st.write(f"Schedule: {zone.schedule}")
+        st.write(f"Parking type: {zone.additional_info}")
+
+
+def render_sidebar_legend() -> None:
+    color_rows = "".join(
+        f"""
+        <div style="display:flex;align-items:center;gap:8px;margin:4px 0;">
+            <span style="width:14px;height:14px;background:{COLOR_HEX[color]};border:1px solid #555;display:inline-block;"></span>
+            <span>{COLOR_LABELS[color]}: {format_money(PRICES[color])}/h</span>
+        </div>
+        """
+        for color in COLOR_FILTERS
+    )
+
+    st.sidebar.divider()
+    st.sidebar.subheader("Map legend")
+    st.sidebar.markdown(color_rows, unsafe_allow_html=True)
+    st.sidebar.caption("Border color = parking-zone tariff color.")
+    st.sidebar.caption("Thick border = current recommended zone.")
+    st.sidebar.caption("Blue solid line = walking route; blue dashed line = straight-line estimate.")
+    st.sidebar.caption("Blue flag = destination.")
+
+
+def render_sidebar() -> dict[str, object]:
+    st.sidebar.header("Parking search")
+
+    with st.sidebar.form("address_search"):
+        address = st.text_input(
+            "Search destination",
+            value=st.session_state.address_query,
+            placeholder="Praca do Comercio, Lisbon",
+        )
+        search_clicked = st.form_submit_button("Search address", use_container_width=True)
+
+    if search_clicked:
+        st.session_state.address_query = address
+        try:
+            with st.spinner("Searching address..."):
+                result = geocode_address(address)
+            set_destination(result.lat, result.lon, result.label, "address")
+            st.sidebar.success("Destination updated.")
+        except Exception as exc:
+            st.sidebar.error(str(exc))
+
+    if st.sidebar.button("Clear destination", use_container_width=True):
+        reset_destination()
+        st.rerun()
+
+    st.sidebar.divider()
+    st.sidebar.subheader("GPS")
+    with st.sidebar:
         loc = streamlit_geolocation()
-
-        radius = st.selectbox("Choose the search radius (meters):", [100, 300, 500, 1000])
-
-        # ---------------------------
-        # 1. LOCALIZAÇÃO
-        # ---------------------------
-        
-        DEFAULT_LAT, DEFAULT_LON = 38.749386, -9.157919
-        user_lat, user_lon = DEFAULT_LAT, DEFAULT_LON
-        location_source = None  # "gps", "click", or None (= default)
-
-        if loc and loc['latitude'] is not None and loc['longitude'] is not None:
-            user_lat = loc['latitude']
-            user_lon = loc['longitude']
-            location_source = "gps"
-
-        if 'clicked_lat' in st.session_state:
-            user_lat = st.session_state.clicked_lat
-            user_lon = st.session_state.clicked_lon
-            location_source = "click"
- 
-        location_ready = location_source is not None
-
-        if not location_ready:
-            st.warning(
-                "⚠️ Your location could not be detected. "
-                "Showing a default position in Lisbon. "
-                "Please press the location button above, or tap the map to set your position."
-            )
-
-        # ---------------------------
-        # 2. MENSAGENS DE TEXTO 
-        # ---------------------------
-        cheap_polys = []
-
-        if location_ready:
-            current_price = get_current_zone(polygons, user_lat, user_lon)
-
-            if current_price is None:
-                st.success("🎉 You are in a free zone (€0/hour)! This is the best possible spot.")
-                cheap_polys = [] 
-            else:
-                st.error(f"📍 You are in a **€{current_price:.2f}/hour** zone.")
-                cheap_price, cheap_polys = find_cheapest_nearby(polygons, user_lat, user_lon, radius, cheaper_than=current_price)
-                
-                if cheap_price is not None:
-                    st.success(f"💸 Found {len(cheap_polys)} zone(s) nearby for only **€{cheap_price:.2f}/hour**! Check the map.")
-                else:
-                    st.info(f"✅ You are already in the cheapest paid zone within a {radius}m radius.")
-        else:
-            st.info("👆 Please click the location button above, or tap on the map to find the best spots.")
-            
-
-        # ----------------------
-        # 2. O DESENHO DO MAPA
-        # ----------------------
-        st.write("*(You can tap anywhere on the map to change your location)*")
-
-        m = folium.Map(location=[user_lat, user_lon], zoom_start=15)
-
-        for poly in cheap_polys:
-            hex_color = COLOR_HEX[poly["color"]]
-            folium.Polygon(
-                locations=poly["coords"],
-                color=hex_color,
-                weight=3,
-                fill=True,
-                fill_color=hex_color,
-                fill_opacity=0.45,
-                tooltip=f"✅ €{prices[poly['color']]:.2f}/hour"
-            ).add_to(m)
- 
-        if location_ready:
-            folium.Marker(
-                [user_lat, user_lon],
-                popup="You are here",
-                icon=folium.Icon(color="black", icon="car", prefix='fa')
-            ).add_to(m)
- 
-            folium.Circle(
-                location=[user_lat, user_lon],
-                radius=radius,
-                color="#3388ff",
-                weight=2,
-                dash_array="5, 10",
-                fill=True,
-                fill_opacity=0.05
-            ).add_to(m)
- 
-        map_data = st_folium(m, width=350, height=450)
- 
-        if map_data and map_data.get("last_clicked"):
-            new_lat = map_data["last_clicked"]["lat"]
-            new_lon = map_data["last_clicked"]["lng"]
-            if new_lat != user_lat or new_lon != user_lon:
-                st.session_state.clicked_lat = new_lat
-                st.session_state.clicked_lon = new_lon
-                st.rerun()
- 
-        if st.button("⬅️ Back to Home"):
-            st.session_state.page = "home"
-            if 'clicked_lat' in st.session_state:
-                del st.session_state['clicked_lat']
-                del st.session_state['clicked_lon']
+    if loc and loc.get("latitude") is not None and loc.get("longitude") is not None:
+        gps_lat = float(loc["latitude"])
+        gps_lon = float(loc["longitude"])
+        if st.session_state.destination_source in (None, "gps") and coordinates_changed(
+            gps_lat,
+            gps_lon,
+            st.session_state.destination_lat,
+            st.session_state.destination_lon,
+        ):
+            set_destination(gps_lat, gps_lon, "Current GPS location", "gps")
+        if st.sidebar.button("Use latest GPS location", use_container_width=True):
+            set_destination(gps_lat, gps_lon, "Current GPS location", "gps")
             st.rerun()
- 
- 
+
+    st.sidebar.divider()
+    if st.sidebar.button("Reset filters", use_container_width=True):
+        reset_filters()
+        st.rerun()
+
+    st.sidebar.subheader("Parking time")
+    if st.sidebar.button("Now", use_container_width=False):
+        now = datetime.now()
+        st.session_state.parking_date = now.date()
+        st.session_state.parking_start_time = time(now.hour, now.minute)
+
+    parking_date = st.sidebar.date_input("Parking date", key="parking_date")
+    parking_start_time = st.sidebar.time_input("Parking start time", key="parking_start_time")
+
+    duration_hours = st.sidebar.number_input(
+        "Parking duration (hours)",
+        min_value=0.25,
+        max_value=24.0,
+        step=0.25,
+        key="duration_hours",
+    )
+    radius_m = st.sidebar.slider("Search radius (meters)", 100, 1000, 500, 100, key="radius_m")
+
+    st.sidebar.subheader("Zone filters")
+    selected_colors = {
+        color
+        for color in COLOR_FILTERS
+        if st.sidebar.checkbox(COLOR_LABELS[color], key=f"filter_{color}")
+    }
+    include_unknown = st.sidebar.checkbox("Unknown price", key="include_unknown")
+
+    with st.sidebar.expander("Optimal balance", expanded=False):
+        cost_importance = st.slider("Cost importance", 0, 100, step=5, key="cost_importance")
+        st.caption(f"Distance importance: {100 - cost_importance}%")
+        st.caption("Score = (cost/top_cost) × cost% + (distance/max_distance) × distance%")
+
+    render_sidebar_legend()
+
+    return {
+        "duration_hours": float(duration_hours),
+        "radius_m": int(radius_m),
+        "selected_colors": selected_colors,
+        "include_unknown": include_unknown,
+        "cost_importance": int(cost_importance),
+        "parking_start": datetime.combine(parking_date, parking_start_time),
+    }
+
+
+@st.cache_data(show_spinner=False)
+def get_zones(cache_version: int):
+    return load_parking_zones("listzones.xml")
+
+
+def main() -> None:
+    st.set_page_config(page_title="🚗BestParking", layout="wide")
+    initialize_state()
+    zones = get_zones(GEOMETRY_CACHE_VERSION)
+    controls = render_sidebar()
+
+    st.title("🚗BestParking")
+    st.caption("Smart Lisbon parking-zone advisor")
+
+    location_ready = st.session_state.destination_source is not None
+    destination_lat = st.session_state.destination_lat
+    destination_lon = st.session_state.destination_lon
+
+    if location_ready:
+        st.success(
+            f"Destination: {st.session_state.destination_label} "
+            f"({st.session_state.destination_source})"
+        )
+    else:
+        st.warning(
+            "No destination selected yet. Showing the default Lisbon position. "
+            "Search an address, use GPS, or click the map."
+        )
+
+    results, _current_zone = build_zone_results(
+        zones=zones,
+        dest_lat=destination_lat,
+        dest_lon=destination_lon,
+        radius_m=controls["radius_m"],
+        selected_colors=controls["selected_colors"],
+        duration_hours=controls["duration_hours"],
+        cost_importance=controls["cost_importance"],
+        include_unknown=controls["include_unknown"],
+        parking_start=controls["parking_start"],
+    )
+
+    comparison_results = recommendation_results(results)
+    reset_recommendation_on_input_change(
+        controls,
+        destination_lat,
+        destination_lon,
+        comparison_results,
+    )
+    selected_recommendation = selected_result(
+        comparison_results,
+        st.session_state.selected_recommendation_polygon_id,
+    )
+    selected = selected_result(results, st.session_state.selected_polygon_id)
+    selected_street = None
+    street_results_by_polygon_id = {}
+    street_by_polygon_id = {}
+
+    if location_ready:
+        for result in comparison_results:
+            street_lat, street_lon, _ = nearest_point_on_polygon(
+                destination_lat,
+                destination_lon,
+                result.zone.coords,
+                result.zone.holes,
+            )
+            try:
+                street_result = reverse_geocode_street(street_lat, street_lon)
+                street_results_by_polygon_id[result.zone.polygon_id] = street_result
+                street_by_polygon_id[result.zone.polygon_id] = street_result.street
+            except Exception:
+                street_by_polygon_id[result.zone.polygon_id] = "Street unavailable"
+
+    routes = {}
+    if location_ready and selected_recommendation:
+        route_lat, route_lon, _ = nearest_point_on_polygon(
+            destination_lat,
+            destination_lon,
+            selected_recommendation.zone.coords,
+            selected_recommendation.zone.holes,
+        )
+        route = fetch_walking_route(
+            destination_lat,
+            destination_lon,
+            route_lat,
+            route_lon,
+        )
+        routes[selected_recommendation.zone.polygon_id] = route
+        apply_route_to_result(
+            selected_recommendation,
+            route.distance_m,
+            route.duration_min,
+            route.is_fallback,
+        )
+        selected_street = street_results_by_polygon_id.get(selected_recommendation.zone.polygon_id)
+
+    summary_result = selected_recommendation or primary_recommendation(comparison_results)
+
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("Radius", f"{controls['radius_m']} m")
+    summary_cols[1].metric("Duration", f"{controls['duration_hours']:.2f}h")
+    summary_cols[2].metric(
+        "Total cost",
+        format_money(summary_result.total_cost if summary_result else None),
+    )
+    if summary_result:
+        summary_cols[3].metric(
+            "Distance to destination + Walking time",
+            f"{summary_result.distance_m:.0f} m / {summary_result.walking_time_min:.0f} min",
+        )
+    else:
+        summary_cols[3].metric("Distance to destination + Walking time", "N/A")
+
+    if summary_result:
+        st.caption(
+            f"Pricing uses start time {controls['parking_start']:%Y-%m-%d %H:%M}; "
+            f"charged hours for the selected zone: {summary_result.billable_hours:.2f}h "
+            f"based on schedule `{summary_result.zone.schedule}`."
+        )
+
+    if location_ready and selected_recommendation:
+        street_text = selected_street.street if selected_street else "Street unavailable"
+        st.info(
+            f"Suggested parking street: **{street_text}** "
+            f"(zone {selected_recommendation.zone.zone_id})"
+        )
+
+    map_col, detail_col = st.columns([2, 1])
+    with map_col:
+        map_results = [selected_recommendation] if selected_recommendation else []
+        parking_map = build_map(
+            results=map_results,
+            destination_lat=destination_lat,
+            destination_lon=destination_lon,
+            radius_m=controls["radius_m"],
+            selected_polygon_id=st.session_state.selected_polygon_id,
+            routes=routes,
+            location_ready=location_ready,
+        )
+        map_data = st_folium(
+            parking_map,
+            key=f"parking_map_{st.session_state.map_key_nonce}",
+            height=620,
+            use_container_width=True,
+            returned_objects=["last_clicked", "last_object_clicked_tooltip"],
+        )
+
+    with detail_col:
+        detail_result = selected or selected_recommendation
+        render_detail_panel(detail_result, show_close=selected is not None)
+
+    if map_data and map_data.get("last_clicked"):
+        new_lat = map_data["last_clicked"]["lat"]
+        new_lon = map_data["last_clicked"]["lng"]
+        if coordinates_changed(new_lat, new_lon, destination_lat, destination_lon):
+            set_destination(new_lat, new_lon, "Map click destination", "click")
+            st.rerun()
+
+    map_selected_id = parse_polygon_id_from_tooltip(
+        map_data.get("last_object_clicked_tooltip") if map_data else None,
+        results,
+    )
+    if map_selected_id and map_selected_id != st.session_state.selected_polygon_id:
+        st.session_state.selected_polygon_id = map_selected_id
+        st.rerun()
+
+    st.subheader("Comparison table")
+    rows = table_rows(
+        comparison_results,
+        st.session_state.selected_recommendation_polygon_id,
+        street_by_polygon_id,
+    )
+    if not rows:
+        st.info("No parking zones match the current filters and radius.")
+        return
+
+    table_key = (
+        "results_table_"
+        f"{controls['parking_start'].strftime('%Y%m%d%H%M')}_"
+        f"{controls['duration_hours']}_"
+        f"{controls['radius_m']}_"
+        f"{controls['cost_importance']}_"
+        + "_".join(str(row["Polygon ID"]) for row in rows)
+    )
+    table_state = st.dataframe(
+        rows,
+        hide_index=True,
+        use_container_width=True,
+        column_order=[
+            "Status",
+            "Zone ID",
+            "Suggested street",
+            "Color",
+            "Price/hour",
+            "Distance",
+            "Walking Time",
+            "Charged Hours",
+            "Duration Cost",
+            "Savings",
+            "Score",
+            "Warning",
+        ],
+        on_select="rerun",
+        selection_mode="single-row",
+        key=table_key,
+    )
+    if table_state.selection.rows:
+        row_index = table_state.selection.rows[0]
+        if row_index >= len(rows):
+            return
+
+        selected_polygon_id = rows[row_index]["Polygon ID"]
+        if selected_polygon_id != st.session_state.selected_recommendation_polygon_id:
+            st.session_state.selected_recommendation_polygon_id = selected_polygon_id
+            st.session_state.selected_polygon_id = selected_polygon_id
+            st.rerun()
+
+
 if __name__ == "__main__":
     main()

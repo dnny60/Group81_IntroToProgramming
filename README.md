@@ -1,43 +1,40 @@
 # BestParking
 
-BestParking is a Streamlit web application that helps users find cheaper parking zones near their current location. It uses local parking-zone data from `listzones.xml`, checks the user's position, and displays nearby cheaper zones on an interactive map.
+BestParking is a Streamlit web application that helps drivers compare regulated parking zones in Lisbon. It combines local EMEL parking-zone polygons from `listzones.xml` with address search, parking-duration pricing, filters, walking-route estimates, and a cost-distance recommendation score.
 
 ## Features
 
-- Detects the user's current location using browser geolocation.
-- Allows manual location selection by clicking on the map.
-- Lets the user choose a search radius: 100m, 300m, 500m, or 1000m.
-- Identifies the current parking-zone price.
-- Finds cheaper nearby paid parking zones.
-- Displays recommended zones on a Folium map.
+- Search a destination by address or landmark using Nominatim.
+- Use browser GPS or click the map to set a destination.
+- Filter zones by color, distance, and unknown-price visibility.
+- Enter parking duration and compare total estimated costs.
+- Choose a parking date and start time so the app only charges hours that fall inside parsed paid schedules.
+- Rank zones by a configurable cost-vs-distance balance.
+- Reset filters to the default demo setup in one click.
+- Highlight cheapest and optimal zones on the map.
+- Draw walking routes to the nearest recommended zone edge using pedestrian OSRM, with straight-line fallback.
+- Estimate the nearest street for the selected recommended parking point using reverse geocoding.
+- Show a focused comparison table for the cheapest, optimal, and closest zones.
+- Show zone details when a recommended row or map zone is selected.
+- Warn when a parsed parking time limit is exceeded.
 
 ## Project Structure
 
 ```text
 .
-├── Project.py          # Main Streamlit application
-├── listzones.xml       # Parking-zone data with polygons and zone information
+├── Project.py          # Streamlit UI and app state
+├── parking_data.py     # XML parsing, constants, time-limit parsing
+├── parking_logic.py    # Distance, filtering, pricing, scoring
+├── geo_services.py     # Nominatim geocoding and OSRM routing
+├── map_view.py         # Folium map rendering
+├── listzones.xml       # Lisbon parking-zone data
 ├── requirements.txt    # Python dependencies
 └── README.md           # Project documentation
 ```
 
-## Requirements
-
-- Python 3.9 or newer
-- pip
-
-Python packages:
-
-```text
-streamlit
-folium
-streamlit-folium
-streamlit-geolocation
-```
-
 ## Installation
 
-Clone or download the project, then install the dependencies:
+Use Python 3.10 or newer.
 
 ```bash
 pip install -r requirements.txt
@@ -45,37 +42,42 @@ pip install -r requirements.txt
 
 ## Running the App
 
-Start the Streamlit application with:
-
 ```bash
 streamlit run Project.py
 ```
 
-Streamlit will open the app in your browser. If it does not open automatically, copy the local URL shown in the terminal.
+If the app does not open automatically, use the local URL shown in the terminal.
 
-## How It Works
+## Data
 
-1. The app loads parking-zone polygons from `listzones.xml`.
-2. Each zone is assigned a price based on its color:
-   - Green: EUR 0.80/hour
-   - Yellow: EUR 1.20/hour
-   - Red: EUR 1.60/hour
-   - Brown: EUR 2.00/hour
-3. The user's location is detected through GPS or selected manually on the map.
-4. The app checks whether the user is inside a paid parking zone.
-5. If the user is in a paid zone, the app searches for cheaper zones within the selected radius.
-6. Recommended zones are highlighted on the map.
+The app uses `listzones.xml`, a DATEX II XML file containing Lisbon regulated parking-zone polygons and metadata. It includes zone IDs, geographic boundaries, tariff colors, product/category text, schedules, and parking type details. It does not include live occupancy or individual parking bay availability.
 
-## Main Technologies
+## External Services
 
-- **Streamlit**: Web app interface
-- **Folium**: Interactive map rendering
-- **streamlit-folium**: Folium integration inside Streamlit
-- **streamlit-geolocation**: Browser-based geolocation
-- **ElementTree**: XML parsing
+- **Nominatim**: address search and nearest-street reverse geocoding.
+- **OSRM public routing services**: pedestrian route estimates.
 
-## Notes
+Both services are cached by Streamlit to reduce repeated requests. If routing fails, or if OSRM returns an obviously excessive detour, the app estimates walking time from straight-line distance.
 
-- The app depends on the `listzones.xml` file being present in the same directory as `Project.py`.
-- If browser geolocation is unavailable, the app uses a default location in Lisbon.
-- A clicked map location overrides the GPS location until the user returns to the home page.
+## Pricing Model
+
+The app estimates price from the zone color:
+
+- Green: EUR 0.80/hour
+- Yellow: EUR 1.20/hour
+- Red: EUR 1.60/hour
+- Brown: EUR 2.00/hour
+
+Total cost is calculated as:
+
+```text
+hourly price * charged hours
+```
+
+`charged hours` are estimated from the XML schedule when the app can parse it, for example `2ª A 6ª 9-19H` only charges the overlap with weekday 09:00-19:00.
+
+The optimal recommendation balances cost and distance using the sidebar weighting control:
+
+```text
+Score = (cost/top_cost) * cost% + (distance/max_distance) * distance%
+```
