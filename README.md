@@ -6,6 +6,7 @@ BestParking is a Streamlit web application that helps drivers compare regulated 
 
 - Search a destination by address or landmark using Nominatim.
 - Use browser GPS or click the map to set a destination.
+- Restrict destination selection to the Lisbon municipality boundary when `lisbon_boundary.geojson` is available.
 - Filter zones by color, distance, and unknown-price visibility.
 - Enter parking duration and compare total estimated costs.
 - Choose a parking date and start time so the app only charges hours that fall inside parsed paid schedules.
@@ -27,6 +28,8 @@ BestParking is a Streamlit web application that helps drivers compare regulated 
 ├── parking_logic.py    # Distance, filtering, pricing, scoring
 ├── geo_services.py     # Nominatim geocoding and OSRM routing
 ├── map_view.py         # Folium map rendering
+├── boundary_data.py    # Lisbon boundary loading and validation
+├── lisbon_boundary.geojson # Lisbon municipality boundary
 ├── listzones.xml       # Lisbon parking-zone data
 ├── requirements.txt    # Python dependencies
 └── README.md           # Project documentation
@@ -51,6 +54,19 @@ If the app does not open automatically, use the local URL shown in the terminal.
 ## Data
 
 The app uses `listzones.xml`, a DATEX II XML file containing Lisbon regulated parking-zone polygons and metadata. It includes zone IDs, geographic boundaries, tariff colors, product/category text, schedules, and parking type details. It does not include live occupancy or individual parking bay availability.
+
+For Lisbon-only map restrictions, the project includes `lisbon_boundary.geojson`, generated from OpenStreetMap relation `5400890` for the Lisbon municipality. It can be rebuilt from Overpass Turbo with:
+
+```overpass
+[out:json][timeout:25];
+rel
+  ["boundary"="administrative"]
+  ["admin_level"="7"]
+  ["name"="Lisboa"];
+out geom;
+```
+
+If the file is missing or invalid, the app shows a warning and runs without the Lisbon boundary restriction.
 
 ## External Services
 

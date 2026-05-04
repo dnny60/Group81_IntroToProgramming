@@ -1,9 +1,11 @@
 from datetime import date, datetime, time
+from pathlib import Path
 
 import streamlit as st
 from streamlit_folium import st_folium
 from streamlit_geolocation import streamlit_geolocation
 
+from boundary_data import LisbonBoundary, is_point_in_lisbon, load_lisbon_boundary
 from geo_services import fetch_walking_route, geocode_address, reverse_geocode_street
 from map_view import build_map
 from parking_data import COLOR_FILTERS, COLOR_HEX, COLOR_LABELS, PRICES, load_parking_zones
@@ -17,8 +19,13 @@ from parking_logic import (
 
 DEFAULT_LAT = 38.749386
 DEFAULT_LON = -9.157919
+BASE_DIR = Path(__file__).resolve().parent
+PARKING_ZONES_PATH = BASE_DIR / "listzones.xml"
+LISBON_BOUNDARY_PATH = BASE_DIR / "lisbon_boundary.geojson"
 GEOMETRY_CACHE_VERSION = 3
-MAP_RENDER_VERSION = 3
+BOUNDARY_CACHE_VERSION = 2
+MAP_RENDER_VERSION = 5
+UNSUPPORTED_AREA_MESSAGE = "This area is not supported. Please choose a destination in Lisbon."
 
 
 def initialize_state() -> None:
@@ -38,6 +45,7 @@ def initialize_state() -> None:
         "parking_start_time": time(9, 0),
         "map_key_nonce": 0,
         "recommendation_signature": None,
+        "area_warning": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -60,6 +68,7 @@ def set_destination(lat: float, lon: float, label: str, source: str) -> None:
     st.session_state.destination_source = source
     st.session_state.selected_polygon_id = None
     st.session_state.selected_recommendation_polygon_id = None
+    st.session_state.area_warning = None
     st.session_state.map_key_nonce += 1
 
 
@@ -70,6 +79,7 @@ def reset_destination() -> None:
     st.session_state.destination_source = None
     st.session_state.selected_polygon_id = None
     st.session_state.selected_recommendation_polygon_id = None
+    st.session_state.area_warning = None
     st.session_state.map_key_nonce += 1
 
 
@@ -85,6 +95,18 @@ def reset_filters() -> None:
 
     for color in COLOR_FILTERS:
         st.session_state[f"filter_{color}"] = True
+
+
+def destination_is_supported(
+    lisbon_boundary: LisbonBoundary | None,
+    lat: float,
+    lon: float,
+) -> bool:
+    return is_point_in_lisbon(lisbon_boundary, lat, lon)
+
+
+def warn_unsupported_area() -> None:
+    st.session_state.area_warning = UNSUPPORTED_AREA_MESSAGE
 
 
 def format_money(value: float | None) -> str:
@@ -239,9 +261,10 @@ def render_sidebar_legend() -> None:
     st.sidebar.caption("Thick border = current recommended zone.")
     st.sidebar.caption("Blue solid line = walking route; blue dashed line = straight-line estimate.")
     st.sidebar.caption("Blue flag = destination.")
+    st.sidebar.caption("Dark grey area = outside the supported Lisbon boundary.")
 
 
-def render_sidebar() -> dict[str, object]:
+def render_sidebar(lisbon_boundary: LisbonBoundary | None) -> dict[str, object]:
     st.sidebar.header("Parking search")
 
     with st.sidebar.form("address_search"):
@@ -257,8 +280,12 @@ def render_sidebar() -> dict[str, object]:
         try:
             with st.spinner("Searching address..."):
                 result = geocode_address(address)
-            set_destination(result.lat, result.lon, result.label, "address")
-            st.sidebar.success("Destination updated.")
+            if destination_is_supported(lisbon_boundary, result.lat, result.lon):
+                set_destination(result.lat, result.lon, result.label, "address")
+                st.sidebar.success("Destination updated.")
+            else:
+                warn_unsupported_area()
+                st.sidebar.warning(UNSUPPORTED_AREA_MESSAGE)
         except Exception as exc:
             st.sidebar.error(str(exc))
 
@@ -279,10 +306,17 @@ def render_sidebar() -> dict[str, object]:
             st.session_state.destination_lat,
             st.session_state.destination_lon,
         ):
-            set_destination(gps_lat, gps_lon, "Current GPS location", "gps")
+            if destination_is_supported(lisbon_boundary, gps_lat, gps_lon):
+                set_destination(gps_lat, gps_lon, "Current GPS location", "gps")
+            else:
+                warn_unsupported_area()
         if st.sidebar.button("Use latest GPS location", use_container_width=True):
-            set_destination(gps_lat, gps_lon, "Current GPS location", "gps")
-            st.rerun()
+            if destination_is_supported(lisbon_boundary, gps_lat, gps_lon):
+                set_destination(gps_lat, gps_lon, "Current GPS location", "gps")
+                st.rerun()
+            else:
+                warn_unsupported_area()
+                st.sidebar.warning(UNSUPPORTED_AREA_MESSAGE)
 
     st.sidebar.divider()
     if st.sidebar.button("Reset filters", use_container_width=True):
@@ -334,14 +368,25 @@ def render_sidebar() -> dict[str, object]:
 
 @st.cache_data(show_spinner=False)
 def get_zones(cache_version: int):
-    return load_parking_zones("listzones.xml")
+    return load_parking_zones(PARKING_ZONES_PATH)
+
+
+@st.cache_data(show_spinner=False)
+def get_lisbon_boundary(cache_version: int):
+    try:
+        return load_lisbon_boundary(LISBON_BOUNDARY_PATH), None
+    except Exception as exc:
+        return None, str(exc)
 
 
 def main() -> None:
     st.set_page_config(page_title="🚗Best Street Parking", layout="wide")
     initialize_state()
     zones = get_zones(GEOMETRY_CACHE_VERSION)
-    controls = render_sidebar()
+    lisbon_boundary, boundary_error = get_lisbon_boundary(BOUNDARY_CACHE_VERSION)
+    if boundary_error:
+        st.sidebar.error(f"Lisbon boundary restriction disabled: {boundary_error}")
+    controls = render_sidebar(lisbon_boundary)
 
     st.title("🚗BestParking")
     st.caption("Smart Lisbon street parking-zone advisor")
@@ -360,6 +405,9 @@ def main() -> None:
             "No destination selected yet. Showing the default Lisbon position. "
             "Search an address, use GPS, or click the map."
         )
+
+    if st.session_state.area_warning:
+        st.warning(st.session_state.area_warning)
 
     results, _current_zone = build_zone_results(
         zones=zones,
@@ -469,6 +517,7 @@ def main() -> None:
             selected_polygon_id=st.session_state.selected_polygon_id,
             routes=routes,
             location_ready=location_ready,
+            lisbon_boundary=lisbon_boundary,
         )
         map_data = st_folium(
             parking_map,
@@ -486,7 +535,11 @@ def main() -> None:
         new_lat = map_data["last_clicked"]["lat"]
         new_lon = map_data["last_clicked"]["lng"]
         if coordinates_changed(new_lat, new_lon, destination_lat, destination_lon):
-            set_destination(new_lat, new_lon, "Map click destination", "click")
+            if destination_is_supported(lisbon_boundary, new_lat, new_lon):
+                set_destination(new_lat, new_lon, "Map click destination", "click")
+            else:
+                warn_unsupported_area()
+                st.session_state.map_key_nonce += 1
             st.rerun()
 
     st.subheader("Comparison table")

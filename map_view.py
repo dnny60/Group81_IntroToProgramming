@@ -4,12 +4,14 @@ import html
 
 import folium
 
+from boundary_data import LisbonBoundary
 from parking_data import COLOR_HEX
 from parking_logic import ZoneResult, get_zone_marker_position
 from geo_services import RouteResult
 
 
 ZONE_FILL_OPACITY = 0.35
+WEB_MERCATOR_WORLD_BOUNDS = (-85.05112878, -180.0, 85.05112878, 180.0)
 
 
 def disable_path_interaction(layer):
@@ -58,6 +60,42 @@ def parking_icon(color: str = "#f39c12") -> folium.DivIcon:
     )
 
 
+def rectangle_ring(bounds: tuple[float, float, float, float]) -> list[tuple[float, float]]:
+    south, west, north, east = bounds
+    return [
+        (south, west),
+        (south, east),
+        (north, east),
+        (north, west),
+        (south, west),
+    ]
+
+
+def boundary_mask_locations(boundary: LisbonBoundary) -> list[list[tuple[float, float]]]:
+    locations = [rectangle_ring(WEB_MERCATOR_WORLD_BOUNDS)]
+    for polygon in boundary.polygons:
+        locations.append(list(polygon.outer))
+        locations.extend(list(hole) for hole in polygon.holes)
+    return locations
+
+
+def add_unsupported_area_mask(parking_map: folium.Map, boundary: LisbonBoundary) -> None:
+    mask = folium.Polygon(
+        locations=boundary_mask_locations(boundary),
+        color="#2f3437",
+        weight=0,
+        fill=True,
+        fill_color="#2f3437",
+        fill_opacity=0.55,
+        fill_rule="evenodd",
+        tooltip="Area not supported",
+        class_name="unsupported-area-mask",
+    )
+    mask.options["interactive"] = True
+    mask.options["bubblingMouseEvents"] = True
+    mask.add_to(parking_map)
+
+
 def build_map(
     results: list[ZoneResult],
     destination_lat: float,
@@ -66,13 +104,29 @@ def build_map(
     selected_polygon_id: int | None,
     routes: dict[int, RouteResult],
     location_ready: bool,
+    lisbon_boundary: LisbonBoundary | None = None,
 ) -> folium.Map:
+    bounds_kwargs = {}
+    if lisbon_boundary is not None:
+        south, west, north, east = lisbon_boundary.padded_bounds
+        bounds_kwargs = {
+            "min_lat": south,
+            "max_lat": north,
+            "min_lon": west,
+            "max_lon": east,
+            "max_bounds": True,
+        }
+
     parking_map = folium.Map(
         location=[destination_lat, destination_lon],
         zoom_start=15,
         control_scale=True,
         prefer_canvas=False,
+        **bounds_kwargs,
     )
+
+    if lisbon_boundary is not None:
+        add_unsupported_area_mask(parking_map, lisbon_boundary)
 
     if location_ready:
         radius_circle = folium.Circle(
