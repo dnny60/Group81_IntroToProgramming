@@ -320,7 +320,7 @@ def render_home_page() -> None:
                 color: #111827;
                 font-size: 3.68rem;
                 font-weight: 400;
-                line-height: 1.16;
+                line-height: 1.5;
                 text-align: left;
                 margin: 0 0 2.4rem;
             }
@@ -361,7 +361,8 @@ def render_home_page() -> None:
         <div class="home-brand">🚗BestStreetParking</div>
         <div class="home-title">
             1. Choose your destination<br>
-            2. Get the best parking area. Done!
+            2. Get the best parking area.<br>
+            Done!
         </div>
         """,
         unsafe_allow_html=True,
