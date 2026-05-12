@@ -26,6 +26,14 @@ GEOMETRY_CACHE_VERSION = 3
 BOUNDARY_CACHE_VERSION = 2
 MAP_RENDER_VERSION = 5
 UNSUPPORTED_AREA_MESSAGE = "This area is not supported. Please choose a destination in Lisbon."
+EXAMPLE_DESTINATIONS = (
+    ("Rua. de Sao Marcal", "Rua de Sao Marcal, Lisboa, Portugal"),
+    ("Cais do Sodre", "Cais do Sodre, Lisboa, Portugal"),
+    (
+        "Avenida Almirante Reis, Anjos, Arroios, Lisboa, 1000-148, Portugal",
+        "Avenida Almirante Reis, Anjos, Arroios, Lisboa, 1000-148, Portugal",
+    ),
+)
 
 
 def initialize_state() -> None:
@@ -46,6 +54,7 @@ def initialize_state() -> None:
         "map_key_nonce": 0,
         "recommendation_signature": None,
         "area_warning": None,
+        "app_started": False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -107,6 +116,40 @@ def destination_is_supported(
 
 def warn_unsupported_area() -> None:
     st.session_state.area_warning = UNSUPPORTED_AREA_MESSAGE
+
+
+def destination_status_text() -> str:
+    label = st.session_state.destination_label
+    source = st.session_state.destination_source
+    if source == "click":
+        return f"Destination: {label}"
+    return f"Destination: {label} ({source})"
+
+
+def map_click_destination_label(lat: float, lon: float) -> str:
+    try:
+        clicked_address = reverse_geocode_street(lat, lon)
+        if clicked_address.label and not clicked_address.label.startswith("No reverse geocoding"):
+            return clicked_address.label
+        if clicked_address.street != "Street unavailable":
+            return clicked_address.street
+    except Exception:
+        pass
+
+    return f"Selected map point ({lat:.6f}, {lon:.6f})"
+
+
+def select_address_destination(lisbon_boundary: LisbonBoundary | None, query: str) -> bool:
+    st.session_state.address_query = query
+    with st.spinner("Searching address..."):
+        result = geocode_address(query)
+
+    if destination_is_supported(lisbon_boundary, result.lat, result.lon):
+        set_destination(result.lat, result.lon, result.label, "address")
+        return True
+
+    warn_unsupported_area()
+    return False
 
 
 def format_money(value: float | None) -> str:
@@ -243,6 +286,94 @@ def render_detail_panel(result, show_close: bool = True) -> None:
         st.write(f"Parking type: {zone.additional_info}")
 
 
+def render_home_page() -> None:
+    st.markdown(
+        """
+        <style>
+            [data-testid="stSidebar"] {
+                display: none;
+            }
+
+            [data-testid="collapsedControl"] {
+                display: none;
+            }
+
+            .block-container {
+                max-width: 1100px;
+                padding-top: 16vh;
+            }
+
+            .stApp {
+                background: #ffffff;
+            }
+
+            .home-brand {
+                color: #111827;
+                font-size: 4.6rem;
+                font-weight: 900;
+                line-height: 1;
+                margin: 0 0 3.2rem;
+                text-align: left;
+            }
+
+            .home-title {
+                color: #111827;
+                font-size: 3.68rem;
+                font-weight: 400;
+                line-height: 1.16;
+                text-align: left;
+                margin: 0 0 2.4rem;
+            }
+
+            div[data-testid="stButton"] > button {
+                border: 0;
+                border-radius: 8px;
+                background: #111827;
+                color: #ffffff;
+                font-size: 1.1rem;
+                font-weight: 700;
+                height: 3.4rem;
+                box-shadow: 0 12px 28px rgba(17, 24, 39, 0.16);
+            }
+
+            div[data-testid="stButton"] > button:hover {
+                background: #0f766e;
+                color: #ffffff;
+                border: 0;
+            }
+
+            @media (max-width: 760px) {
+                .block-container {
+                    padding-top: 12vh;
+                }
+
+                .home-brand {
+                    font-size: 3rem;
+                    line-height: 1.1;
+                }
+
+                .home-title {
+                    font-size: 2.16rem;
+                }
+
+            }
+        </style>
+        <div class="home-brand">🚗BestStreetParking</div>
+        <div class="home-title">
+            1. Choose your destination<br>
+            2. Get the best parking area. Done!
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    start_col, _ = st.columns([1, 4])
+    with start_col:
+        if st.button("Start", use_container_width=True):
+            st.session_state.app_started = True
+            st.rerun()
+
+
 def render_sidebar_legend() -> None:
     color_rows = "".join(
         f"""
@@ -276,18 +407,28 @@ def render_sidebar(lisbon_boundary: LisbonBoundary | None) -> dict[str, object]:
         search_clicked = st.form_submit_button("Search address", use_container_width=True)
 
     if search_clicked:
-        st.session_state.address_query = address
         try:
-            with st.spinner("Searching address..."):
-                result = geocode_address(address)
-            if destination_is_supported(lisbon_boundary, result.lat, result.lon):
-                set_destination(result.lat, result.lon, result.label, "address")
+            if select_address_destination(lisbon_boundary, address):
                 st.sidebar.success("Destination updated.")
             else:
-                warn_unsupported_area()
                 st.sidebar.warning(UNSUPPORTED_AREA_MESSAGE)
         except Exception as exc:
             st.sidebar.error(str(exc))
+
+    st.sidebar.caption("Examples")
+    for index, (button_label, query) in enumerate(EXAMPLE_DESTINATIONS, start=1):
+        if st.sidebar.button(
+            button_label,
+            key=f"example_destination_{index}",
+            use_container_width=True,
+        ):
+            try:
+                if select_address_destination(lisbon_boundary, query):
+                    st.sidebar.success("Destination updated.")
+                else:
+                    st.sidebar.warning(UNSUPPORTED_AREA_MESSAGE)
+            except Exception as exc:
+                st.sidebar.error(str(exc))
 
     if st.sidebar.button("Clear destination", use_container_width=True):
         reset_destination()
@@ -382,13 +523,18 @@ def get_lisbon_boundary(cache_version: int):
 def main() -> None:
     st.set_page_config(page_title="🚗Best Street Parking", layout="wide")
     initialize_state()
+
+    if not st.session_state.app_started:
+        render_home_page()
+        return
+
     zones = get_zones(GEOMETRY_CACHE_VERSION)
     lisbon_boundary, boundary_error = get_lisbon_boundary(BOUNDARY_CACHE_VERSION)
     if boundary_error:
         st.sidebar.error(f"Lisbon boundary restriction disabled: {boundary_error}")
     controls = render_sidebar(lisbon_boundary)
 
-    st.title("🚗BestParking")
+    st.title("🚗BestStreetParking")
     st.caption("Smart Lisbon street parking-zone advisor")
 
     location_ready = st.session_state.destination_source is not None
@@ -396,10 +542,7 @@ def main() -> None:
     destination_lon = st.session_state.destination_lon
 
     if location_ready:
-        st.success(
-            f"Destination: {st.session_state.destination_label} "
-            f"({st.session_state.destination_source})"
-        )
+        st.success(destination_status_text())
     else:
         st.warning(
             "No destination selected yet. Showing the default Lisbon position. "
@@ -536,7 +679,9 @@ def main() -> None:
         new_lon = map_data["last_clicked"]["lng"]
         if coordinates_changed(new_lat, new_lon, destination_lat, destination_lon):
             if destination_is_supported(lisbon_boundary, new_lat, new_lon):
-                set_destination(new_lat, new_lon, "Map click destination", "click")
+                with st.spinner("Finding clicked address..."):
+                    destination_label = map_click_destination_label(new_lat, new_lon)
+                set_destination(new_lat, new_lon, destination_label, "click")
             else:
                 warn_unsupported_area()
                 st.session_state.map_key_nonce += 1
